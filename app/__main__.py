@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
 
@@ -14,6 +15,27 @@ from app.domain import DomainStore
 from app.evaluation import EvaluationLog, EvaluationLogError
 from app.mcp_client import DomainClient
 from app.workflow import ReplyNotAdmitted
+
+logger = logging.getLogger("app.cli")  # Not __name__: under "python -m app" that is "__main__".
+
+
+LOG_FORMAT = logging.Formatter("%(asctime)s %(levelname)-7s %(name)-11s %(message)s", "%H:%M:%S")
+
+
+def setup_logging():
+    """High-level process log on stderr: only our own loggers, not the SDK/MCP chatter."""
+    handler = logging.StreamHandler()
+    handler.setFormatter(LOG_FORMAT)
+    logging.basicConfig(level=logging.WARNING, handlers=[handler])
+    logging.getLogger("app").setLevel(os.environ.get("LOG_LEVEL", "INFO").upper())
+
+
+def log_to_file(path):
+    """The same lines next to the evaluation JSON; a resumed ticket appends to its run's file."""
+    handler = logging.FileHandler(path.with_suffix(".log"), encoding="utf-8")
+    handler.setFormatter(LOG_FORMAT)
+    logging.getLogger("app").addHandler(handler)
+    return handler
 
 
 class CliError(Exception):
@@ -62,11 +84,14 @@ async def run(path):
             require_api_key()
         run_id, log = wf["run_id"], EvaluationLog.load(wf["log_path"])
         work = runtime.resume_request(event, wf, log)
+    handler = log_to_file(log.path)
+    logger.info("run %s: %s for ticket %s", run_id, event["event_type"], event["ticket_id"])
     try:
         final = await work
         print(json.dumps(final, indent=2))
     except Exception as exc:
         # Record exception types (the real causes, not the wrapper), never raw provider bodies/credentials.
+        logger.error("run %s failed: %s", run_id, cause_names(exc))
         log.event("error", error_type=cause_names(exc))
         if not any(isinstance(cause, (EvaluationLogError, ReplyNotAdmitted)) for cause in root_causes(exc)):
             log.status(agent_state="failed", request_outcome="technical_failure", reason=cause_names(exc))
@@ -75,6 +100,8 @@ async def run(path):
         log.snapshot(store.snapshot(run_id))
         print(f"Evaluation JSON: {log.path}")
         print(f"Domain run: {run_id}")
+        logging.getLogger("app").removeHandler(handler)
+        handler.close()
 
 
 def require_api_key():
@@ -85,6 +112,7 @@ def require_api_key():
 def main():
     from pathlib import Path
     load_dotenv(ROOT / ".env")
+    setup_logging()
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check", help="Check MCP discovery/read/write without an API key.")
