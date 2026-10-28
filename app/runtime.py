@@ -113,6 +113,8 @@ class Session:
             result = await domain.call(name, args)
             if result["ok"] and name in rules.WRITES:
                 wf["effects"].append({"tool": name, "arguments": args, "result": result})
+            elif name == "pay_claim" and result["error"]["code"] != "INVALID_ARGUMENT":
+                wf.setdefault("failed_payments", []).append(args["claim_id"])  # A real attempt that did not pay.
         if not result["ok"] and result["error"]["code"] == "INVALID_ARGUMENT":
             wf["format_errors"].setdefault(name, []).append({"arguments": args, "error": result["error"]})
         elif result["ok"]:
@@ -190,11 +192,23 @@ class Session:
                     "policy_id": proposal["arguments"]["policy_id"], "claim_id": proposal["arguments"]["claim_id"],
                     "outcome": "pending_authorization", "reason": "Awaiting insurer authorization: " + proposal.get("reason", "")})
             self.log.human_requested("authorization", proposal)
+        await self.close_records(domain, final)
         wf["state"] = final["agent_state"]
         self.log.status(agent_state=final["agent_state"], request_outcome=final["request_outcome"], reason=final["reason"],
                         message=final["message"], request_category=wf["category"])
         workflow.save(wf)
         return final
+
+    async def close_records(self, domain, final):
+        """No record this request created stays open when it ends: store the actual outcome on it."""
+        claims = self.state()["claims"]
+        for claim_id in rules.created_claims(self.wf):
+            outcome = rules.closing_record_outcome(final["request_outcome"], claims[claim_id]["status"],
+                                                   claim_id in self.wf.get("failed_payments", []))
+            if outcome:
+                await self.call(domain, "record_claim_outcome", {
+                    "policy_id": claims[claim_id]["policy_id"], "claim_id": claim_id, "outcome": outcome,
+                    "reason": f"Request closed with {final['request_outcome']}: {final['reason']}"})
 
     async def drive(self):
         """Run the agent; hand over once to the other agent if this one says the request belongs there."""

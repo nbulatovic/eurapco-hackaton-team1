@@ -20,7 +20,7 @@ Status reflects the code on the branches below, not a scored evaluation run.
 | 3 | [Workflow state and stop/resume](#3-workflow-state-and-stopresume) | ✅ Done | Per-ticket workflow file; replies resume the same run and log |
 | 4 | [Admissibility, authority, proposal integrity](#4-admissibility-authority-and-proposal-integrity) | ✅ Done | Every write goes through a rule gate; approval runs the exact saved proposal |
 | 5 | [Calculation and duplicate prevention](#5-calculation-and-duplicate-prevention) | ✅ Done | Deterministic formula and duplicate key in code, covered by 34 tests |
-| 6 | [Reimbursement-record lifecycle](#6-reimbursement-record-lifecycle) | ✅ Done | Defined when a record is created, paid, pending or rejected |
+| 6 | [Reimbursement-record lifecycle](#6-reimbursement-record-lifecycle) | ✅ Done | Every record ends in its actual outcome; state diagram and 20 tests |
 | 7 | [Skills per agent](#7-skills-per-agent) | ❌ Not started | Loader wired and template written; no skills yet |
 | 8 | [Logger integration](#8-logger-integration) | ✅ Done | Routing, status, human rounds, resumes, blocks and gaps all logged |
 | 9 | [Actual results, working enquiries](#9-actual-results-and-working-enquiries) | 🟡 Partial | Claimed effects must be backed by tool results; full ticket run pending |
@@ -131,10 +131,40 @@ Status reflects the code on the branches below, not a scored evaluation run.
 | … insurer approves | Paid | `pay_claim` with the saved amount | `paid` |
 | … insurer rejects | Rejected | `record_claim_outcome(rejected)` | `insurer_rejected` |
 | Final reimbursement 0.00 | Rejected | `create_claim` → `record_claim_outcome(rejected)` | `zero_reimbursement` |
+| Payment attempted and failed | Payment failed | `pay_claim` fails → `record_claim_outcome(payment_failed)` | `technical_failure` |
 
-**Files:** `agents/claims/prompt.md`, `app/runtime.py`, `app/rules.py`
+```mermaid
+stateDiagram-v2
+    [*] --> registered: create_claim (only when admissible, complete, not a duplicate)
+    registered --> paid: pay_claim (final ≤ EUR 1500)
+    registered --> pending_authorization: final > EUR 1500
+    pending_authorization --> paid: insurer approves, pay_claim with the saved amount
+    pending_authorization --> rejected: insurer rejects
+    registered --> rejected: final is 0.00
+    registered --> payment_failed: pay_claim fails
+    pending_authorization --> payment_failed: approved pay_claim fails
+    registered --> not_covered: closed as not_covered
+    registered --> incomplete: closed as insufficient_information
+    registered --> invalid: closed for any other reason
+```
 
-**Still open:** record `payment_failed` on the claim when an approved payment fails, and write the lifecycle up in `docs/design.md`.
+**Design decisions**
+- **No record before the request is admissible.** Exclusions, inactive policies, uninsured patients, dates outside cover, duplicates and missing information close without a record, so history only holds real reimbursement attempts.
+- **The record is created before asking the insurer.** The proposal then names an existing `claim_id`, and the pending record blocks a duplicate registration while the insurer decides.
+- **No record stays open when a request ends.** When the request closes, the harness stores the actual outcome on any record it created that is still `registered` or `pending_authorization`. The model never has to remember it. Zero reimbursement is recorded as `rejected`.
+- **A failed payment is recorded as `payment_failed`.** Such a record can still be paid later, so it also counts as pending for duplicates.
+- **Handover keeps the record open.** After a technical failure or handover without a payment attempt, the record stays `registered` for the colleague who takes over, and keeps blocking a duplicate.
+
+**What we did**
+- `rules.closing_record_outcome()`: one pure function maps the request outcome to the record outcome (table above).
+- `Session.close_records()` applies it when every request ends, through the same write gate as any other call.
+- Real `pay_claim` failures are tracked per record, so a failed approved payment ends as `payment_failed` instead of staying `pending_authorization`.
+- The Claims prompt no longer asks the model to record outcomes itself.
+- `tests/test_claim_lifecycle.py` (20 tests, no model): the mapping, and complete paths on a real domain store with a fake client: zero reimbursement, orphan record, pending while waiting, approve → paid with the remaining limit updated, reject → rejected without payment, failed approved payment → `payment_failed`, handover, valid log.
+
+**Files:** `app/rules.py`, `app/runtime.py`, `agents/claims/prompt.md`, `tests/test_claim_lifecycle.py`
+
+**Still open:** nothing for this task.
 
 ## 7. Skills per agent
 
@@ -184,4 +214,4 @@ Status reflects the code on the branches below, not a scored evaluation run.
 
 ---
 
-**Tests:** 110 of 112 pass, including 25 minimum-information and 34 calculation tests that need no model. The two failures come from the starter kit: one test still expects replies to be rejected, the other compares a path with Windows separators.
+**Tests:** 130 of 132 pass, including 25 minimum-information, 34 calculation and 20 record-lifecycle tests that need no model. The two failures come from the starter kit: one test still expects replies to be rejected, the other compares a path with Windows separators.
