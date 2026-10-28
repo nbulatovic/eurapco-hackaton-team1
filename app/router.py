@@ -103,8 +103,13 @@ async def route(
     agents: dict[str, str] = AGENTS,
     threshold: float = CONFIDENCE_THRESHOLD,
 ) -> str:
-    agent, confidence = await classify(text, agents)
-    logger.info("route: typesafe -> %s (confidence %.2f, threshold %.2f)", agent, confidence, threshold)
+    try:
+        agent, confidence = await classify(text, agents)
+    except Exception:
+        # Already logged in classify(); an unavailable classifier must not fail the request.
+        agent, confidence = None, 0.0
+    else:
+        logger.info("route: typesafe -> %s (confidence %.2f, threshold %.2f)", agent, confidence, threshold)
 
     if agent in agents and confidence >= threshold:
         logger.info("route: accepted typesafe choice %s", agent)
