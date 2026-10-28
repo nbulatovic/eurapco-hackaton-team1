@@ -15,7 +15,7 @@ from app.contracts import document, validator
 from app.domain import DomainStore, error
 from app.mcp_client import DomainClient
 from app.router import route
-from app.skills import load_skills
+from app.skills import select_skills
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +48,11 @@ async def pick_agent(request):
     return choice if isinstance(choice, str) else choice["agent"]
 
 
-def system_prompt(agent):
+def system_prompt(agent, category=None):
+    """The agent's prompt plus its skills: only the category's skill once the category is known."""
     prompt = admin_prompt() if agent == "administration" else claims_prompt()
-    for name, text in load_skills(agent):
-        prompt += f"\n\n# Skill: {name}\n{text}"
+    for name, description, body in select_skills(agent, category):
+        prompt += f"\n\n# Skill: {name}\n{description}\n\n{body}"
     prompt += "\nReturn ONLY one JSON object matching this response schema when done or waiting:\n"
     # Without "$schema": the model tends to copy it into its answer, which the schema then rejects.
     schema = {key: value for key, value in document("agent-response.schema.json").items() if key != "$schema"}
@@ -139,7 +140,7 @@ class Session:
     async def loop(self, domain):
         wf, messages = self.wf, self.wf["messages"]
         tools = domain.model_tools() + ([{"name": n, **t} for n, t in LOCAL_TOOLS.items()] if wf["agent"] == "claims" else [])
-        prompt = system_prompt(wf["agent"])
+        prompt = system_prompt(wf["agent"], wf["category"])
         logger.info("agent %s: started", wf["agent"])
         for turn in range(1, MAX_TURNS + 1):
             response = await self.model().messages.create(

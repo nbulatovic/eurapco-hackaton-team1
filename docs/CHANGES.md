@@ -21,7 +21,7 @@ Status reflects the code on the branches below, not a scored evaluation run.
 | 4 | [Admissibility, authority, proposal integrity](#4-admissibility-authority-and-proposal-integrity) | ✅ Done | Every write goes through a rule gate; approval runs the exact saved proposal |
 | 5 | [Calculation and duplicate prevention](#5-calculation-and-duplicate-prevention) | ✅ Done | Deterministic formula and duplicate key in code, covered by 34 tests |
 | 6 | [Reimbursement-record lifecycle](#6-reimbursement-record-lifecycle) | ✅ Done | Every record ends in its actual outcome; state diagram and 20 tests |
-| 7 | [Skills per agent](#7-skills-per-agent) | ❌ Not started | Loader wired and template written; no skills yet |
+| 7 | [Skills per agent](#7-skills-per-agent) | ✅ Done | Six skills, one per operation, loaded by category |
 | 8 | [Logger integration](#8-logger-integration) | ✅ Done | Routing, status, human rounds, resumes, blocks and gaps all logged |
 | 9 | [Actual results, working enquiries](#9-actual-results-and-working-enquiries) | 🟡 Partial | Claimed effects must be backed by tool results; full ticket run pending |
 
@@ -173,12 +173,25 @@ stateDiagram-v2
 **Starter kit:** a loader in `app/skills.py` that nothing called, and empty skill folders.
 
 **What we did**
-- The loader is wired in: every skill in `skills/<agent>/` is appended to that agent's system prompt.
-- `skills/TEMPLATE.md` defines the format: when to use, what to read first, steps, when to ask the policyholder, when to ask the insurer, when to close.
+- **Six skills, one per supported operation:**
 
-**Files:** `app/runtime.py`, `skills/TEMPLATE.md`
+  | Agent | Skill | What it adds beyond the policy text |
+  |---|---|---|
+  | Claims | `reimbursement-request` | Service-to-category table, the order of checks, exact create_claim values, how to explain the amount |
+  | Claims | `claim-enquiry` | How to find the record without an ID, what to say for each record status |
+  | Administration | `policy-enquiry` | Which policy field answers which question; "how do I terminate?" stays an enquiry |
+  | Administration | `contact-update` | Exact value formats, ask only for the missing address parts |
+  | Administration | `coverage-change` | Threshold table for the final values, one proposal for a combined change |
+  | Administration | `policy-termination` | Always a proposal, never a direct call; already terminated means no_change |
 
-**Still open:** write the skills (for example `reimbursement-request`, `claim-enquiry`, `coverage-change`, `contact-update`), move the procedures out of the prompts, and load only the skill for the routed category.
+- **Each skill says what the harness will refuse,** so the agent does not try a call that will be blocked. That saves turns.
+- **Loaded by category:** `select_skills(agent, category)` reads each skill's frontmatter and returns only the skill for the request's category. Before the category is known, or when none covers it (a request handed over from the other agent), the agent gets all of its skills. Once the router sets the category, only that skill is sent: the Administration prompt for a coverage change drops from about 12,600 to 8,100 characters.
+- **Procedures moved out of the prompts:** the prompts keep the general rules; each operation's procedure lives only in its skill.
+- `tests/test_skills.py` (9 tests): valid frontmatter, required sections, every supported operation has a skill, selection by category, the template is not loaded, the prompt carries the skill without its frontmatter.
+
+**Files:** `skills/claims/*.md`, `skills/administration/*.md`, `skills/README.md`, `app/skills.py`, `app/runtime.py`, `agents/*/prompt.md`, `tests/test_skills.py`
+
+**Still open:** run the training tickets with the model to compare turns and outcomes with the previous prompts. The router team sets `wf["category"]` so that only one skill is loaded from the first turn.
 
 ## 8. Logger integration
 
@@ -214,4 +227,4 @@ stateDiagram-v2
 
 ---
 
-**Tests:** 130 of 132 pass, including 25 minimum-information, 34 calculation and 20 record-lifecycle tests that need no model. The two failures come from the starter kit: one test still expects replies to be rejected, the other compares a path with Windows separators.
+**Tests:** 139 of 141 pass, including 25 minimum-information, 34 calculation, 20 record-lifecycle and 9 skill tests that need no model. The two failures come from the starter kit: one test still expects replies to be rejected, the other compares a path with Windows separators.
