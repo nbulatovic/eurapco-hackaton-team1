@@ -1,4 +1,4 @@
-"""Run the baseline or verify supplied infrastructure."""
+"""Run tickets and replies through the harness, or verify supplied infrastructure."""
 
 import argparse
 import asyncio
@@ -8,10 +8,12 @@ import sys
 
 from dotenv import load_dotenv
 
+from app import workflow
 from app.contracts import ROOT, validator
 from app.domain import DomainStore
 from app.evaluation import EvaluationLog, EvaluationLogError
 from app.mcp_client import DomainClient
+from app.workflow import ReplyNotAdmitted
 
 
 class CliError(Exception):
@@ -42,24 +44,31 @@ async def check():
 
 
 async def run(path):
-    request = json.loads(path.read_text(encoding="utf-8"))
-    validator("events.schema.json").validate(request)
-    if request["event_type"] != "request":
-        raise CliError("This baseline runs initial requests only. Reply events are not admitted or resumed: "
-                       "implement correlation and resumption yourself (see docs/contracts.md).")
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise CliError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key.")
-    from app.runtime import run_request
+    """An initial request starts a new run; a reply resumes the waiting run of its ticket."""
+    from app import runtime
+    event = json.loads(path.read_text(encoding="utf-8"))
+    validator("events.schema.json").validate(event)
     store = DomainStore()
-    run_id = store.start_run()
-    log = EvaluationLog(request, run_id, os.environ.get("TEAM_ID", "TEAM-1"))
+    if event["event_type"] == "request":
+        require_api_key()
+        run_id = store.start_run()
+        log = EvaluationLog(event, run_id, os.environ.get("TEAM_ID", "TEAM-1"))
+        work = runtime.run_request(event, run_id, log)
+    else:
+        wf = workflow.load(event["ticket_id"])
+        if wf is None:
+            raise CliError(f"Reply events are not admitted: no workflow for ticket {event['ticket_id']}. Run its initial request first.")
+        if event["event_type"] == "clarification_reply":
+            require_api_key()
+        run_id, log = wf["run_id"], EvaluationLog.load(wf["log_path"])
+        work = runtime.resume_request(event, wf, log)
     try:
-        final = await run_request(request, run_id, log)
+        final = await work
         print(json.dumps(final, indent=2))
     except Exception as exc:
         # Record exception types (the real causes, not the wrapper), never raw provider bodies/credentials.
         log.event("error", error_type=cause_names(exc))
-        if not any(isinstance(cause, EvaluationLogError) for cause in root_causes(exc)):
+        if not any(isinstance(cause, (EvaluationLogError, ReplyNotAdmitted)) for cause in root_causes(exc)):
             log.status(agent_state="failed", request_outcome="technical_failure", reason=cause_names(exc))
         raise
     finally:
@@ -68,13 +77,18 @@ async def run(path):
         print(f"Domain run: {run_id}")
 
 
+def require_api_key():
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        raise CliError("ANTHROPIC_API_KEY is not set. Copy .env.example to .env and add your key.")
+
+
 def main():
     from pathlib import Path
     load_dotenv(ROOT / ".env")
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("check", help="Check MCP discovery/read/write without an API key.")
-    command = sub.add_parser("run", help="Run one independent initial ticket through the real baseline.")
+    command = sub.add_parser("run", help="Run an initial ticket (new run) or a reply event (resumes its ticket).")
     command.add_argument("ticket", type=Path)
     command = sub.add_parser("validate-log", help="Validate a cumulative evaluation JSON file.")
     command.add_argument("path", type=Path)
@@ -93,7 +107,7 @@ def main():
                 return 1
             print("OK: evaluation log matches the common schema.")
     except Exception as exc:
-        known = [cause for cause in root_causes(exc) if isinstance(cause, (CliError, EvaluationLogError))]
+        known = [cause for cause in root_causes(exc) if isinstance(cause, (CliError, EvaluationLogError, ReplyNotAdmitted))]
         if known:
             print(f"ERROR: {known[0]}", file=sys.stderr)
         else:
