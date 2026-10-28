@@ -3,7 +3,7 @@
 import json
 import re
 
-from app import rules
+from app import minimum_info, rules
 from app.contracts import ROOT, atomic_json
 
 DIRECTORY = ROOT / ".runtime" / "workflows"
@@ -60,9 +60,29 @@ def merge_reply(facts, reply):
     return merged
 
 
+def check_minimum_information(final, wf):
+    """A reimbursement asks for exactly what the matrix says is missing, once; never for an excluded service."""
+    if (final["request_category"] != "reimbursement_request"
+            or final["request_outcome"] not in ("information_requested", "insufficient_information")):
+        return final, None
+    facts = wf["facts"]
+    if minimum_info.excluded(facts):
+        return None, "The service is excluded from cover: close with not_covered without asking for any documents."
+    gaps = minimum_info.missing(facts)
+    if not gaps:
+        return None, "All minimum information is present: do not ask or close; continue the reimbursement."
+    wf["missing"] = gaps
+    if wf["clarification_used"]:
+        return final, None  # Still missing after the one reply: settle() closes with insufficient_information.
+    # First pass: ask, even if the model wanted to close, with the question generated from the gaps.
+    return {**final, "request_outcome": "information_requested", "question": minimum_info.build_question(gaps)}, None
+
+
 def settle(final, wf, state):
     """Return (final, None) when the answer may stand, or (None, feedback) to send back to the model."""
-    final = dict(final)
+    final, feedback = check_minimum_information(dict(final), wf)
+    if feedback:
+        return None, feedback
     outcome = final["request_outcome"]
     if outcome == "information_requested":
         if final["request_category"] == "unclear":
