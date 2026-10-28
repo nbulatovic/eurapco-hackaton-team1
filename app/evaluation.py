@@ -75,7 +75,8 @@ def json_value(value, field="record", ancestors=None):
 
 class EvaluationLog:
     def __init__(self, request, run_id, team_id, directory=None):
-        self.path = Path(directory or ROOT / "logs") / f"{run_id}.json"
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S-%fZ")
+        self.path = Path(directory or ROOT / "logs") / f"{now}_{run_id}.json"
         self.record = {
             "schema_version": "1", "team_id": team_id, "run_id": run_id,
             "ticket_id": request["ticket_id"], "policy_id": request["policy_id"],
