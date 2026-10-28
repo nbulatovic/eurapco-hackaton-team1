@@ -19,7 +19,7 @@ Status reflects the code on the branches below, not a scored evaluation run.
 | 2 | [Minimum information, asked once](#2-minimum-information-asked-once) | ✅ Done | Matrix, invoice parser and generated question in code |
 | 3 | [Workflow state and stop/resume](#3-workflow-state-and-stopresume) | ✅ Done | Per-ticket workflow file; replies resume the same run and log |
 | 4 | [Admissibility, authority, proposal integrity](#4-admissibility-authority-and-proposal-integrity) | ✅ Done | Every write goes through a rule gate; approval runs the exact saved proposal |
-| 5 | [Calculation and duplicate prevention](#5-calculation-and-duplicate-prevention) | 🟡 Partial | Deterministic formula and duplicate key in code; unit tests missing |
+| 5 | [Calculation and duplicate prevention](#5-calculation-and-duplicate-prevention) | ✅ Done | Deterministic formula and duplicate key in code, covered by 34 tests |
 | 6 | [Reimbursement-record lifecycle](#6-reimbursement-record-lifecycle) | ✅ Done | Defined when a record is created, paid, pending or rejected |
 | 7 | [Skills per agent](#7-skills-per-agent) | ❌ Not started | Loader wired and template written; no skills yet |
 | 8 | [Logger integration](#8-logger-integration) | ✅ Done | Routing, status, human rounds, resumes, blocks and gaps all logged |
@@ -105,13 +105,19 @@ Status reflects the code on the branches below, not a scored evaluation run.
 
 **What we did**
 - `calculate_reimbursement()`: max(0, expense − deductible) × 80 %, rounded half-up to cents with `Decimal`, capped by the remaining limit, plus the authorization flag (strictly above EUR 1500).
-- `find_duplicate()`: provider ID + invoice number + invoice-date year, against paid or pending records.
+- `find_duplicate()`: provider ID + invoice number + invoice-date year, against paid or pending records. Pending includes `payment_failed`, because such a record can still be paid; a second record could lead to a double payment.
 - Both are offered to the Claims agent as local tools, so it never calculates by itself.
-- `pay_claim` is refused unless the amount equals the calculated one.
+- `pay_claim` is refused unless the amount equals the calculated one, is never sent for 0.00, needs the exact approved proposal above EUR 1500, and only applies to a record created in the same request.
+- `tests/test_calculation.py` (34 tests, no model):
+  - the policy examples: 180 → 104.00, 1925 → 1500.00 (autonomous), 2000 → 1560.00 (insurer), 2000 with 900 remaining → 900.00 (autonomous);
+  - deductible floor, rounding to cents, strict threshold (1500.02 needs the insurer), current deductible after a coverage change, no remaining limit;
+  - invariants over about 13,000 amounts: never negative, never above the remaining limit or 80 % of the expense, always two decimals;
+  - each part of the duplicate key, and which record statuses block;
+  - the gates: duplicate registration refused (T13 → CL-H001), wrong amount, zero payment, approval above the threshold, capped payment.
 
-**Files:** `app/rules.py`, `app/runtime.py`
+**Files:** `app/rules.py`, `app/runtime.py`, `tests/test_calculation.py`
 
-**Still open:** unit tests with the policy examples: 180 → 104.00, 1925 → 1500.00, 2000 → 1560.00, and 2000 with 900 remaining → 900.00.
+**Still open:** nothing for this task.
 
 ## 6. Reimbursement-record lifecycle
 
@@ -178,4 +184,4 @@ Status reflects the code on the branches below, not a scored evaluation run.
 
 ---
 
-**Tests:** 75 of 77 pass, including 25 new minimum-information tests that need no model. The two failures come from the starter kit: one test still expects replies to be rejected, the other compares a path with Windows separators.
+**Tests:** 110 of 112 pass, including 25 minimum-information and 34 calculation tests that need no model. The two failures come from the starter kit: one test still expects replies to be rejected, the other compares a path with Windows separators.

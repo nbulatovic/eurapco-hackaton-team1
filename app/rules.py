@@ -11,7 +11,8 @@ WRITES = ("update_contact_details", "update_coverage", "terminate_policy",
           "create_claim", "pay_claim", "record_claim_outcome")
 PROPOSABLE = ("update_coverage", "terminate_policy", "pay_claim")
 PRESCRIPTION_SERVICES = ("diagnostic_test", "physiotherapy")
-DUPLICATE_STATUSES = ("registered", "pending_authorization", "paid")
+# Paid, or pending: payment_failed can still be paid (domain allows pay_claim on it), so it blocks a second record.
+DUPLICATE_STATUSES = ("registered", "pending_authorization", "payment_failed", "paid")
 AUTH_REQUIRED, BLOCKED = "AUTH_REQUIRED", "BLOCKED"
 
 
