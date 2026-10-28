@@ -3,19 +3,71 @@
 Team 1 · Eurapco hackathon · 28 Oct 2026
 
 For each task in the brief: what the starter kit gave us, what we built on top of it, and what is still open.
-Status reflects the code on the branches below, not a scored evaluation run.
+Status reflects the code on `main` after pull requests #1–#4 and our runs of the 15 training tickets, not a scored evaluation.
 
-| Branch | Content |
-|---|---|
-| `main` | Core harness: workflow, rules, write gate |
-| `fix/response-schema` | Agent answers no longer rejected for a copied `$schema` key |
-| `feature/minimum-information` | Minimum-information matrix in code (includes the fix above) |
+## In one sentence
+
+**Code decides what is allowed; the model interprets the request and writes the answer.** The starter kit trusted the model with every rule. We moved routing, missing-information checks, business rules, calculation, duplicates, the record lifecycle and human replies into the harness, and gave each agent one skill per operation.
+
+## How a request flows
+
+```mermaid
+flowchart TD
+    E[Event] -->|request| R[Router: TypeSafe, Claude fallback]
+    E -->|clarification_reply / insurer_decision| W[(Workflow file per ticket<br/>same run ID, same log)]
+    W --> A
+    R --> A[Agent: prompt + skill for the category]
+    A -->|tool call| G{Write gate<br/>rules.check_tool_call}
+    G -->|allowed| T[9 MCP domain tools<br/>+ calculate_reimbursement, check_duplicate]
+    G -->|refused| A
+    T --> A
+    A -->|answer| S{Settle: minimum info,<br/>claimed effects, state}
+    S -->|missing info| Q[One generated question<br/>awaiting_clarification]
+    S -->|needs insurer| P[Saved proposal<br/>awaiting_authorization]
+    S -->|done| C[Close open records, log status + snapshot]
+    Q --> W
+    P --> W
+```
+
+| Layer | Who decides | Where |
+|---|---|---|
+| Which agent | Router (TypeSafe, then Claude) | `app/router.py` |
+| What is missing, and the question | Code | `app/minimum_info.py` |
+| How to do the operation | Model, guided by a skill | `skills/`, `app/skills.py` |
+| Whether a write is allowed | Code | `app/rules.py` |
+| Amount and duplicates | Code | `app/rules.py` (local tools) |
+| What happens after an insurer decision | Code, without the model | `app/runtime.py` |
+| What is reported as done | Tool results, not the model's claim | `app/workflow.py` |
+
+## Results on the training tickets
+
+Latest run of each initial request, read from `logs/`. Every run follows the policy's expected outcome.
+
+| Ticket | Request | Agent · category | Result | Evidence in the log |
+|---|---|---|---|---|
+| T01 | Physiotherapy covered? deductible, remaining limit | admin · policy_enquiry | completed · answered | `get_policy` only, no writes |
+| T02 | Status of claim CL-H001 | claims · claim_enquiry | completed · answered | read only |
+| T03 | Change phone number | admin · contact_update | completed · updated | phone +393331234567 → +393339998888 in the snapshot |
+| T04 | New address without postal code | admin · contact_update | awaiting_clarification → reply → completed · updated | 1 clarification round; same run ID; repeated replies refused |
+| T05 | Limit 5000, deductible 200 | admin · coverage_change | completed · updated | at the thresholds, so no insurer needed |
+| T06 | Limit 10000, deductible 500, together | admin · coverage_change | awaiting_authorization | one combined proposal, nothing written |
+| T07 | Terminate my policy | admin · policy_termination | awaiting_authorization | proposal, `terminate_policy` not called |
+| T08 | Specialist consultation, EUR 180 | claims · reimbursement_request | completed · paid 104.00 | calculated in code: (180 − 50) × 80 % |
+| T09 | Blood test, no prescription | claims · reimbursement_request | awaiting_clarification | asks for the prescription only |
+| T10 | Physiotherapy on the last day of cover | claims · reimbursement_request | completed · paid | last day counted as covered |
+| T11 | Specialist, EUR 2000 | claims · reimbursement_request | awaiting_authorization | final 1560.00 > 1500; record created and pending |
+| T12 | MRI EUR 2000, POL-002 with 900 left | claims · reimbursement_request | completed · paid 900.00 | capped by remaining limit, so autonomous |
+| T13 | Cardiology invoice already paid | claims · reimbursement_request | closed · duplicate | `check_duplicate` → CL-H001, no record, no payment |
+| T14 | Dental cleaning, no documents | claims · reimbursement_request | closed · not_covered | no documents requested |
+| T15 | Specialist on POL-003 | claims · reimbursement_request | closed · inactive_policy | no record created |
+
+Insurer approve and reject (T06, T07, T11) are covered by the automated lifecycle tests on a real domain store; live runs of those replies are in the open items below.
 
 ## Status by task
 
 | # | Task | Status | Main change |
 |---|---|---|---|
-| 1 | [Router and classification](#1-router-and-classification) | 🟡 Partial | Single routing entry point and agent-to-agent handover; decision model not wired yet |
+| 1 | [Router and classification](#1-router-and-classification) | ✅ Done | TypeSafe classifier with Claude fallback; handover between agents; category validated |
 | 2 | [Minimum information, asked once](#2-minimum-information-asked-once) | ✅ Done | Matrix, invoice parser and generated question in code |
 | 3 | [Workflow state and stop/resume](#3-workflow-state-and-stopresume) | ✅ Done | Per-ticket workflow file; replies resume the same run and log |
 | 4 | [Admissibility, authority, proposal integrity](#4-admissibility-authority-and-proposal-integrity) | ✅ Done | Every write goes through a rule gate; approval runs the exact saved proposal |
@@ -23,7 +75,7 @@ Status reflects the code on the branches below, not a scored evaluation run.
 | 6 | [Reimbursement-record lifecycle](#6-reimbursement-record-lifecycle) | ✅ Done | Every record ends in its actual outcome; state diagram and 20 tests |
 | 7 | [Skills per agent](#7-skills-per-agent) | ✅ Done | Six skills, one per operation, loaded by category |
 | 8 | [Logger integration](#8-logger-integration) | ✅ Done | Routing, status, human rounds, resumes, blocks and gaps all logged |
-| 9 | [Actual results, working enquiries](#9-actual-results-and-working-enquiries) | 🟡 Partial | Claimed effects must be backed by tool results; full ticket run pending |
+| 9 | [Actual results, working enquiries](#9-actual-results-and-working-enquiries) | ✅ Done | Claimed effects must be backed by tool results; all 15 tickets run with the expected outcome |
 
 ---
 
@@ -34,14 +86,16 @@ Status reflects the code on the branches below, not a scored evaluation run.
 **Starter kit:** one regular expression. Any of "claim", "invoice", "reimburse" sends the request to Claims, everything else to Administration. The agent's model then picks the category on its own.
 
 **What we did**
-- `pick_agent()` is now the only place that calls the router. It accepts a plain agent name or a full decision object, so the decision model (Jev) can be plugged in without touching the rest of the runtime.
+- **Classifier:** the router asks TypeSafe (`system_one` with one `Choice`) to pick between the two agents. Each agent has a description of its responsibilities and signals, and the routing context says to route on what the policyholder wants done, not on the words used.
+- **Confidence threshold 0.7:** below it, or when the answer is not an agent, Claude classifies with the same descriptions. If TypeSafe is unavailable (no `TYPESAFE_API_KEY`, network error), the request also falls back to Claude instead of failing. Administration is the last default.
+- `pick_agent()` is the only place that calls the router, and accepts a sync or async router returning a name or a decision object.
 - If an agent classifies the request as belonging to the other agent (`out_of_scope_claims` / `out_of_scope_administration`), the harness hands it over once, before any effect, and logs the handover and the new routing.
 - The returned category is checked against the vocabulary of the handling agent; an invalid one goes back to the model with feedback.
 - All requests follow one common path: route, gather facts, check rules, ask or propose, execute, record, answer.
 
 **Files:** `app/runtime.py`, `app/router.py`
 
-**Still open:** replace the regex with Jev. Send the context (request text plus whether an invoice, prescription or claim ID is attached), the routing question and the agent descriptions; validate the answer in code, fall back to simple rules if Jev fails, and log who decided.
+**Still open:** pass whether an invoice, prescription or claim ID is attached to the classifier, not only the text. Record in the evaluation log which classifier decided and with what confidence (today it is in the process log only).
 
 ## 2. Minimum information, asked once
 
@@ -204,10 +258,11 @@ stateDiagram-v2
 - Refused tool calls are logged with `harness_blocked`, refused repeats as errors, and a format-error handover includes a report of every attempt.
 - The clarification request records exactly which items were missing; a reply that contradicts the original facts is noted in the status reason.
 - A test checks that every event kind the runtime writes exists in the log schema, after an unknown kind made a T09 run fail.
+- **Process log:** besides the evaluation JSON, each run writes a readable `.log` next to it (and to the console): routing, each agent turn and its tools, blocked calls, handovers, insurer decisions and the final outcome. A resumed ticket appends to the same file.
 
-**Files:** `app/runtime.py`, `app/__main__.py`, `tests/test_minimum_info.py`
+**Files:** `app/runtime.py`, `app/__main__.py`, `app/router.py`, `tests/test_minimum_info.py`
 
-**Still open:** log the router's decision (who decided and why) once Jev is connected.
+**Still open:** the router's decision and confidence in the evaluation JSON, not only in the process log.
 
 ## 9. Actual results and working enquiries
 
@@ -223,7 +278,10 @@ stateDiagram-v2
 
 **Files:** `app/workflow.py`, `app/runtime.py`
 
-**Still open:** run T01–T15 with their replies and compare each message with the domain snapshot. Use templates for messages on paths without an insurer decision.
+- All 15 training tickets ran with the expected outcome (see [Results](#results-on-the-training-tickets)). Enquiries (T01, T02) answer from tool data and make no writes.
+- Each domain run starts from `data/initial.json`, so tickets stay independent; effects are visible in the run's `domain_snapshot`, and a reply keeps the effects of its own run.
+
+**Still open:** live runs of insurer approve and reject on T06, T07 and T11 (covered today by automated tests). Templates for messages on paths without an insurer decision.
 
 ---
 
