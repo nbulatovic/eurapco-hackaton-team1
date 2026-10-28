@@ -11,8 +11,18 @@ WRITES = ("update_contact_details", "update_coverage", "terminate_policy",
           "create_claim", "pay_claim", "record_claim_outcome")
 PROPOSABLE = ("update_coverage", "terminate_policy", "pay_claim")
 PRESCRIPTION_SERVICES = ("diagnostic_test", "physiotherapy")
-DUPLICATE_STATUSES = ("registered", "pending_authorization", "paid")
+# Paid, or pending: payment_failed can still be paid (domain allows pay_claim on it), so it blocks a second record.
+DUPLICATE_STATUSES = ("registered", "pending_authorization", "payment_failed", "paid")
 AUTH_REQUIRED, BLOCKED = "AUTH_REQUIRED", "BLOCKED"
+# Record lifecycle: how a record this request created ends when the request closes without paying it.
+OPEN_RECORD_STATUSES = ("registered", "pending_authorization")
+WAITING_OUTCOMES = ("information_requested", "authorization_requested")
+CLOSING_RECORD_OUTCOME = {
+    "zero_reimbursement": "rejected", "insurer_rejected": "rejected", "not_covered": "not_covered",
+    "insufficient_information": "incomplete",
+    **dict.fromkeys(("duplicate", "inactive_policy", "outside_coverage_period", "not_insured", "invalid_input",
+                     "out_of_scope", "unclear", "answered", "no_change", "updated", "terminated"), "invalid"),
+}
 
 
 def money(value):
@@ -38,6 +48,18 @@ def find_duplicate(claims, provider_id, invoice_number, invoice_date):
                 and invoice["invoice_number"] == invoice_number and invoice["invoice_date"][:4] == invoice_date[:4]):
             return claim
     return None
+
+
+def closing_record_outcome(request_outcome, status, payment_failed):
+    """The outcome to store on a record this request created, or None to leave the record as it is.
+
+    A waiting request keeps its record open. A failed payment is recorded as payment_failed. A technical
+    failure or handover without a payment attempt leaves the record open for the colleague who takes over."""
+    if request_outcome in WAITING_OUTCOMES or status not in OPEN_RECORD_STATUSES:
+        return None
+    if payment_failed:
+        return "payment_failed"
+    return CLOSING_RECORD_OUTCOME.get(request_outcome)
 
 
 def created_claims(wf):
@@ -130,7 +152,7 @@ def check_tool_call(name, args, state, wf, approved=None):
         claim = state["claims"][args["claim_id"]]
         calculation = calculate_reimbursement(claim["invoice"]["expense"], policy)
         if Decimal(calculation["final"]) == 0:
-            return BLOCKED, "Calculated reimbursement is 0.00: do not pay; record outcome rejected and close with zero_reimbursement."
+            return BLOCKED, "Calculated reimbursement is 0.00: do not pay; close with zero_reimbursement (the harness records the outcome)."
         if args["amount"] != calculation["final"]:
             return BLOCKED, f"The amount must be the calculated reimbursement {calculation['final']}."
         if calculation["requires_authorization"]:
