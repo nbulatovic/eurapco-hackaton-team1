@@ -3,6 +3,7 @@
 import json
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from app import minimum_info
 from app.contracts import TOOLS, validator
 
 CENT = Decimal("0.01")
@@ -79,6 +80,13 @@ def check_tool_call(name, args, state, wf, approved=None):
         return BLOCKED, (f"Policy is {policy['status']}: close without execution (request_outcome "
                          f"{'no_change' if policy['status'] == 'terminated' else 'inactive_policy'}).")
 
+    if name == "update_contact_details":
+        unsupported = minimum_info.unsupported_contact_values(args["changes"], wf["facts"])
+        if unsupported:
+            return BLOCKED, (f"{unsupported} do not appear in the request or the reply: never supply contact values "
+                             "yourself. Ask for them (once) or close with insufficient_information.")
+        return None
+
     if name == "update_coverage":
         terms, thresholds = policy["financial_terms"], policy["authorization_thresholds"]
         changed = {field: value for field, value in args["changes"].items() if _decimal(value) != _decimal(terms[field])}
@@ -100,14 +108,15 @@ def check_tool_call(name, args, state, wf, approved=None):
         period = policy["coverage_period"]
         if not period["start"] <= invoice["service_date"] <= period["end"]:
             return BLOCKED, "The service date is outside the coverage period: close with outside_coverage_period."
-        invoice_text = facts.get("invoice_text") or ""
-        if not invoice_text.strip():
-            return BLOCKED, "No invoice text was supplied: ask for it (once) or close with insufficient_information."
-        missing = [value for value in (invoice["provider_id"], invoice["invoice_number"]) if value not in invoice_text]
-        if missing:
-            return BLOCKED, f"{missing} do not appear in the supplied invoice text: use only actual invoice facts."
-        if service in PRESCRIPTION_SERVICES and not (facts.get("prescription_text") or "").strip():
-            return BLOCKED, "This service needs prescription_text: ask for it (once) or close with insufficient_information."
+        gaps = minimum_info.missing(facts)
+        if service in PRESCRIPTION_SERVICES and not (facts.get("prescription_text") or "").strip() and "prescription" not in gaps:
+            gaps.append("prescription")
+        if gaps:
+            return BLOCKED, (f"Minimum information is missing: {gaps}. Ask for all of it (once) or close with "
+                             "insufficient_information; register no record.")
+        mismatches = minimum_info.invoice_mismatches(args, facts)
+        if mismatches:
+            return BLOCKED, f"These values differ from the supplied invoice text; use exactly: {mismatches}."
         if created_claims(wf):
             return BLOCKED, "A reimbursement record was already created for this request."
         duplicate = find_duplicate(state["claims"].values(), invoice["provider_id"],

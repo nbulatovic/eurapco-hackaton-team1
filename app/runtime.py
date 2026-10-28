@@ -9,7 +9,7 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from agents.administration.agent import system_prompt as admin_prompt
 from agents.claims.agent import system_prompt as claims_prompt
-from app import rules, workflow
+from app import minimum_info, rules, workflow
 from app.contracts import document, validator
 from app.domain import DomainStore, error
 from app.mcp_client import DomainClient
@@ -176,9 +176,13 @@ class Session:
         """Record the observed transition; on suspension save what the human reply will resume."""
         wf = self.wf
         wf["category"] = final["request_category"] or wf["category"]
+        # The log schema has a fixed set of event kinds: the gaps travel inside the clarification or the reason.
+        gaps = wf.pop("missing", None)
+        if gaps and final["request_outcome"] == "insufficient_information":
+            final = {**final, "reason": f"{final['reason']} Still missing after the clarification: {', '.join(gaps)}."}
         if final["request_outcome"] == "information_requested":
             wf["clarification_used"] = True
-            self.log.human_requested("clarification", {"question": final["question"]})
+            self.log.human_requested("clarification", {"question": final["question"], "missing": gaps or []})
         elif final["request_outcome"] == "authorization_requested":
             wf["proposal"] = proposal = final["proposal"]
             if proposal["tool"] == "pay_claim":
@@ -267,9 +271,11 @@ async def resume_request(event, wf, log, provider=None):
     async with Session(wf, log, provider) as session:
         if event["event_type"] == "insurer_decision":
             return await session.decide(event)
+        changed = minimum_info.conflicts(wf["facts"], event)
         wf["facts"] = workflow.merge_reply(wf["facts"], event)
+        kept = f" It differs on {', '.join(changed)}; the original request facts are kept." if changed else ""
         log.status(agent_state="processing", request_outcome="in_progress",
-                   reason="Clarification reply received.", request_category=wf["category"])
+                   reason="Clarification reply received." + kept, request_category=wf["category"])
         wf["messages"].append({"role": "user", "content": "HARNESS: the policyholder's clarification reply (the only one; "
                                "if information is still missing, close with insufficient_information): " + json.dumps(event)})
         return await session.drive()
