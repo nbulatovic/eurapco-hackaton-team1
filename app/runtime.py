@@ -50,7 +50,9 @@ def system_prompt(agent):
     for name, text in load_skills(agent):
         prompt += f"\n\n# Skill: {name}\n{text}"
     prompt += "\nReturn ONLY one JSON object matching this response schema when done or waiting:\n"
-    return prompt + json.dumps(document("agent-response.schema.json"))
+    # Without "$schema": the model tends to copy it into its answer, which the schema then rejects.
+    schema = {key: value for key, value in document("agent-response.schema.json").items() if key != "$schema"}
+    return prompt + json.dumps(schema)
 
 
 def closing(wf, outcome, reason, message):
@@ -151,10 +153,13 @@ class Session:
             text = "".join(b.text for b in response.content if b.type == "text")
             try:
                 final = json.loads(text[text.index("{"):text.rindex("}") + 1])  # Tolerate prose or fences around it.
+                final.pop("$schema", None)  # A copied schema keyword, not part of the answer.
                 validator("agent-response.schema.json").validate(final)
             except (ValueError, ValidationError) as exc:
                 self.log.event("error", error_type="InvalidAgentResponse", detail=str(exc)[:300])
-                messages.append({"role": "user", "content": "HARNESS: Return ONLY one JSON object matching the response schema."})
+                problem = exc.message if isinstance(exc, ValidationError) else "the reply did not contain one valid JSON object"
+                messages.append({"role": "user", "content": f"HARNESS: Your answer was rejected: {problem}. "
+                                 "Return ONLY the corrected JSON object matching the response schema."})
                 continue
             self.log.event("model_response", response=final)
             if final["request_category"] not in document("vocabulary.json")["request_categories"][wf["agent"]]:
