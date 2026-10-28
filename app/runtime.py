@@ -2,6 +2,7 @@
 
 import inspect
 import json
+import logging
 import os
 
 from anthropic import AsyncAnthropic
@@ -15,6 +16,8 @@ from app.domain import DomainStore, error
 from app.mcp_client import DomainClient
 from app.router import route
 from app.skills import select_skills
+
+logger = logging.getLogger(__name__)
 
 MAX_TURNS = 12
 MAX_CORRECTIONS = 3
@@ -105,9 +108,11 @@ class Session:
             self.log.event("tool_result", name=name, result=result, local=True)
         elif previous := next((e["result"] for e in wf["effects"] if e["tool"] == name and e["arguments"] == args), None):
             self.log.event("error", error_type="RepeatedWriteRefused", name=name, arguments=args)
+            logger.warning("tool %s: repeated write refused", name)
             return previous  # Never repeat a successful write; report what already happened.
         elif objection := rules.check_tool_call(name, args, self.state(), wf, approved):
             result = error("INVALID_STATE", "HARNESS: " + objection[1])
+            logger.warning("tool %s: blocked by harness: %s", name, objection[1])
             self.log.event("tool_call", name=name, arguments={"run_id": wf["run_id"], **args})
             self.log.event("tool_result", name=name, result=result, harness_blocked=True)
         else:
@@ -124,6 +129,7 @@ class Session:
 
     def handover(self, name):
         attempts = self.wf["format_errors"][name]
+        logger.warning("handover: %s failed format validation %d times", name, len(attempts))
         self.log.event("handover", report={
             "request": self.wf["facts"]["text"], "tool": name, "attempts": attempts,
             "why_stopped": f"{name} still failed format validation after {MAX_CORRECTIONS} correction attempts.",
@@ -135,7 +141,8 @@ class Session:
         wf, messages = self.wf, self.wf["messages"]
         tools = domain.model_tools() + ([{"name": n, **t} for n, t in LOCAL_TOOLS.items()] if wf["agent"] == "claims" else [])
         prompt = system_prompt(wf["agent"], wf["category"])
-        for _ in range(MAX_TURNS):
+        logger.info("agent %s: started", wf["agent"])
+        for turn in range(1, MAX_TURNS + 1):
             response = await self.model().messages.create(
                 model=os.environ.get("ANTHROPIC_MODEL", "claude-haiku-5-5"), max_tokens=1800,
                 system=prompt, messages=messages, tools=tools,
@@ -143,6 +150,7 @@ class Session:
             messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in response.content]})
             calls = [b for b in response.content if b.type == "tool_use"]
             if calls:
+                logger.info("agent %s: turn %d -> tools %s", wf["agent"], turn, ", ".join(c.name for c in calls))
                 results = []
                 for call in calls:
                     result = await self.call(domain, call.name, call.input)
@@ -160,6 +168,7 @@ class Session:
                 validator("agent-response.schema.json").validate(final)
             except (ValueError, ValidationError) as exc:
                 self.log.event("error", error_type="InvalidAgentResponse", detail=str(exc)[:300])
+                logger.warning("agent %s: turn %d -> invalid response, asking for a correction", wf["agent"], turn)
                 problem = exc.message if isinstance(exc, ValidationError) else "the reply did not contain one valid JSON object"
                 messages.append({"role": "user", "content": f"HARNESS: Your answer was rejected: {problem}. "
                                  "Return ONLY the corrected JSON object matching the response schema."})
@@ -170,8 +179,11 @@ class Session:
             else:
                 final, feedback = workflow.settle(final, wf, self.state())
             if feedback:
+                logger.info("agent %s: turn %d -> answer sent back: %s", wf["agent"], turn, feedback)
                 messages.append({"role": "user", "content": "HARNESS: " + feedback})
                 continue
+            logger.info("agent %s: turn %d -> answer %s / %s", wf["agent"], turn,
+                        final["request_category"], final["request_outcome"])
             return final
         raise RuntimeError("Turn budget exhausted. Stop and hand over; do not repeat successful writes.")
 
@@ -195,6 +207,7 @@ class Session:
             self.log.human_requested("authorization", proposal)
         await self.close_records(domain, final)
         wf["state"] = final["agent_state"]
+        logger.info("done: %s -> %s (%s)", wf["category"], final["request_outcome"], final["agent_state"])
         self.log.status(agent_state=final["agent_state"], request_outcome=final["request_outcome"], reason=final["reason"],
                         message=final["message"], request_category=wf["category"])
         workflow.save(wf)
@@ -220,6 +233,7 @@ class Session:
                 if (final["request_category"] == WRONG_AGENT[wf["agent"]] and not wf["handed_over"]
                         and not wf["effects"] and not wf["clarification_used"]):
                     other = OTHER_AGENT[wf["agent"]]
+                    logger.info("handover: %s -> %s (%s)", wf["agent"], other, final["reason"])
                     self.log.event("handover", from_agent=wf["agent"], to_agent=other, reason=final["reason"])
                     self.log.route(other)
                     wf.update(agent=other, handed_over=True, messages=wf["messages"][:1])
@@ -230,6 +244,7 @@ class Session:
         """Insurer decision: execute exactly the saved proposal, or nothing. No model involved."""
         wf, proposal = self.wf, self.wf["proposal"]
         tool, args = proposal["tool"], proposal["arguments"]
+        logger.info("insurer decision: %s on %s", event["decision"], tool)
         async with DomainClient(wf["run_id"], wf["agent"], self.log) as domain:
             if event["decision"] == "reject":
                 if tool == "pay_claim":
@@ -267,7 +282,9 @@ async def run_request(request, run_id, log, provider=None):
     validator("events.schema.json").validate(request)
     if request["event_type"] != "request":
         raise ValueError("Replies resume an existing workflow: use resume_request.")
+    logger.info("request %s: routing", request["ticket_id"])
     agent = await pick_agent(request)
+    logger.info("request %s: routed to %s", request["ticket_id"], agent)
     log.route(agent)
     async with Session(workflow.new(request, run_id, log.path, agent), log, provider) as session:
         return await session.drive()
@@ -281,6 +298,7 @@ async def resume_request(event, wf, log, provider=None):
     if wf["state"] != expected:
         raise workflow.ReplyNotAdmitted(f"Ticket {wf['ticket_id']} is {wf['state']}, not {expected}: "
                                         f"{event['event_type']} not admitted.")
+    logger.info("resume %s: %s admitted (agent %s)", wf["ticket_id"], event["event_type"], wf["agent"])
     wf["state"] = "processing"
     workflow.save(wf)  # A second copy of this reply is refused from now on.
     async with Session(wf, log, provider) as session:
